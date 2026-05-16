@@ -26,10 +26,15 @@ Expected runtime: ~5-8 minutes for 377 items on free tier.
 """
 
 import logging
+import os
 import re
 import sys
 import time
 from typing import Dict, List, Tuple
+
+# Ensure the project root (parent of scripts/) is on sys.path so that
+# `shl_agent` is importable regardless of how/where this script is invoked.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dotenv import load_dotenv
 load_dotenv()
