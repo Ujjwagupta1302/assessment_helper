@@ -1,0 +1,36 @@
+# render.yaml — Render.com deployment configuration
+#
+# Render reads this file from the repo root to set up the service.
+# Push to GitHub, connect Render to your repo, and it picks this up automatically.
+#
+# The buildCommand runs once per deploy:
+#   1. Installs Python dependencies
+#   2. Builds the ChromaDB vector index from data.json
+#
+# The startCommand runs the FastAPI server. Render injects PORT.
+
+services:
+  - type: web
+    name: shl-agent
+    runtime: python
+    plan: free
+    region: oregon
+
+    branch: staging
+    autoDeploy: true
+
+    buildCommand: |
+      pip install -r requirements.txt
+      python scripts/build_index.py
+
+    startCommand: uvicorn shl_agent.main:app --host 0.0.0.0 --port $PORT
+
+    healthCheckPath: /health
+
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: LOG_LEVEL
+        value: INFO
+      - key: PYTHON_VERSION
+        value: "3.11"
