@@ -3,3 +3,4 @@ chroma_db
 D:\SHL Simulator\database\chroma_db\chroma.sqlite3
 venv
 .env
+filtered_catalog_dump.json

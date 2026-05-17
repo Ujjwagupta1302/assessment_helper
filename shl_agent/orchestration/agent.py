@@ -158,12 +158,23 @@ def _build_filtered_catalog(conversation_text: str) -> str:
         urls = embed_and_search(sub_queries[0], top_k=TOP_K_CANDIDATES)
     else:
         urls = embed_and_search_multi(sub_queries, total_top_k=TOP_K_CANDIDATES)
+
+        #print(f">>>>>>>>>>>>>>>>>>>>>> {len(urls)} <<<<<<<<<<<<<<")
  
     if not urls:
         logger.warning("Vector search returned no results — using full catalog")
         return get_catalog_for_prompt()
  
     filtered_json = get_filtered_catalog_for_prompt(urls)
+    '''
+    try:
+        with open("filtered_catalog_dump.json", "w", encoding="utf-8") as _f:
+            json.dump(json.loads(filtered_json), _f, indent=2)
+    except OSError as _e:
+        logger.warning("Could not write filtered_catalog_dump.json: %s", _e)
+
+    '''
+
     logger.info(
         "Filtered catalog: %d candidates from %d sub-queries "
         "(prompt size: %d chars / ~%d tokens)",

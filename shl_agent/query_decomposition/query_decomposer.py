@@ -30,7 +30,6 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-from shl_agent.query_decomposition.constants import *
 
 load_dotenv()
 
@@ -85,6 +84,13 @@ RULES:
   4. Each query should be a short, search-friendly sentence (5-15 words).
   5. Do NOT include conversational filler ("the user wants...").
   6. Do NOT invent dimensions the user did not mention.
+  7. MULTI-TURN AWARENESS: If the conversation has prior turns, the
+     dimensions ACCUMULATE across turns. The most recent user message
+     adds to or modifies the previous context — it does NOT replace it.
+     When the user says "also add X", "include something for Y", "drop Z",
+     or similar refinement language, output sub-queries covering BOTH
+     the original axes (from earlier turns) AND the new request.
+     The vector retrieval needs the full picture, not just the latest ask.
 
 EXAMPLES:
 
@@ -117,6 +123,37 @@ Conversation:
 
 Output:
 ["Numerical reasoning cognitive aptitude assessment for graduates", "Financial accounting and finance knowledge test for analysts", "Situational judgment test for graduate work-context decisions"]
+
+MULTI-TURN EXAMPLES — REFINE / ADD / DROP
+
+Conversation:
+  USER: "Hiring graduate financial analysts. Need numerical reasoning and finance knowledge."
+  ASSISTANT: "Here are 4 items: Numerical Reasoning, Financial Accounting, Basic Statistics, OPQ32r."
+  USER: "Also add a situational judgement element for graduates."
+
+Output:
+["Numerical reasoning cognitive aptitude assessment for graduates", "Financial accounting and finance knowledge test for analysts", "Personality assessment for graduate analysts", "Situational judgment test for graduate work-context decisions"]
+
+Conversation:
+  USER: "Hiring a Java developer who speaks Spanish."
+  ASSISTANT: "Here is a spread covering Core Java, Java 8, Spanish, and OPQ."
+  USER: "Add something for SQL and drop the personality test."
+
+Output:
+["Java programming knowledge assessment for software developers", "Spanish language proficiency test for workplace communication", "SQL database querying knowledge test"]
+
+Conversation:
+  USER: "Need an assessment for mid-level Java backend engineers."
+  ASSISTANT: "Here are 5 Java technical items."
+  USER: "Also include something for Spring and a cognitive aptitude check."
+
+Output:
+["Java backend developer technical assessment", "Spring framework knowledge test", "Cognitive aptitude reasoning test for mid-level engineers"]
+
+Note in each multi-turn example above: the sub-queries cover the
+ORIGINAL dimensions from the first turn PLUS the new request. The
+catalog retrieval needs the full picture so the agent can build an
+updated shortlist that keeps the items already in play.
 
 Now decompose the following conversation. Output ONLY the JSON array.
 """
@@ -157,6 +194,25 @@ def decompose_query(conversation_text: str) -> List[str]:
     return sub_queries
 
 
+def _model_supports_thinking(model_name: str) -> bool:
+    """
+    Return True if the model has an internal-thinking mode whose budget
+    we want to set to zero.
+
+    Only Gemini 2.5 Pro / Flash (the full versions) have thinking mode.
+    Flash-Lite, 1.5 Flash, and 1.5 Flash-8b do not — passing thinking_config
+    to them either fails or is silently ignored, so we skip it.
+    """
+    if not model_name:
+        return False
+    lowered = model_name.lower()
+    if "lite" in lowered or "8b" in lowered:
+        return False
+    if lowered.startswith("gemini-1.5"):
+        return False
+    return True
+
+
 def _call_decomposer(conversation_text: str) -> Optional[List[str]]:
     """
     Make the decomposition LLM call. Returns the sub-query list on success,
@@ -167,12 +223,17 @@ def _call_decomposer(conversation_text: str) -> Optional[List[str]]:
         "Output the JSON array of sub-queries now."
     )
 
-    config = types.GenerateContentConfig(
-        system_instruction=DECOMPOSE_PROMPT,
-        response_mime_type="application/json",
-        temperature=0.2,
-        max_output_tokens=512,
-    )
+    config_kwargs = {
+        "system_instruction": DECOMPOSE_PROMPT,
+        "response_mime_type": "application/json",
+        "temperature": 0.2,
+        "max_output_tokens": 2048,
+    }
+
+    if _model_supports_thinking(DECOMPOSE_MODEL):
+        config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+
+    config = types.GenerateContentConfig(**config_kwargs)
 
     try:
         result = _client.models.generate_content(
@@ -206,8 +267,14 @@ def _parse_decomposer_output(raw_text: str) -> Optional[List[str]]:
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError as exc:
-        logger.error("Decomposer output not valid JSON: %s\nRaw: %s", exc, raw_text[:300])
-        return None
+        logger.warning(
+            "Decomposer output not valid JSON, attempting tolerant parse: %s",
+            exc,
+        )
+        data = _tolerant_array_parse(cleaned)
+        if not data:
+            logger.error("Decomposer tolerant parse also failed. Raw: %s", raw_text[:300])
+            return None
 
     if not isinstance(data, list):
         logger.error("Decomposer output is not a JSON array: %s", type(data).__name__)
@@ -215,3 +282,19 @@ def _parse_decomposer_output(raw_text: str) -> Optional[List[str]]:
 
     sub_queries = [str(q).strip() for q in data if str(q).strip()]
     return sub_queries or None
+
+
+def _tolerant_array_parse(text: str) -> Optional[List[str]]:
+    """
+    Recover whatever complete strings can be extracted from a truncated
+    JSON array. Useful when the response was cut off mid-string.
+
+    Strategy: find every fully-quoted string in the text. This catches
+    completed elements even if the array is missing its closing ].
+    """
+    import re
+    matches = re.findall(r'"((?:[^"\\]|\\.)*)"', text)
+    items = [m for m in matches if m.strip()]
+    if items:
+        logger.info("Tolerant parse recovered %d strings from truncated output", len(items))
+    return items if items else None
