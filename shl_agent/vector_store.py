@@ -125,25 +125,25 @@ def embed_text(text: str, task_type: str = "retrieval_query") -> List[float]:
 def embed_and_search(query: str, top_k: int = 30) -> List[str]:
     """
     Embed a query and return the top-K most similar catalog URLs.
-
+ 
     Returns an empty list if anything goes wrong — the caller should
     fall back to using the full catalog rather than crash.
     """
     if not query.strip():
         return []
-
+ 
     try:
         query_embedding = embed_text(query, task_type="retrieval_query")
     except Exception as exc:
         logger.exception("Failed to embed query: %s", exc)
         return []
-
+ 
     try:
         collection = get_collection()
     except Exception as exc:
         logger.exception("Failed to load Chroma collection: %s", exc)
         return []
-
+ 
     try:
         results = collection.query(
             query_embeddings=[query_embedding],
@@ -153,19 +153,96 @@ def embed_and_search(query: str, top_k: int = 30) -> List[str]:
     except Exception as exc:
         logger.exception("ChromaDB query failed: %s", exc)
         return []
-
+ 
     metadatas = results.get("metadatas") or [[]]
     if not metadatas or not metadatas[0]:
         return []
-
+ 
     urls = [m.get("url", "") for m in metadatas[0] if m and m.get("url")]
     return urls
-
-
+ 
+ 
+# ============================================================================
+# Multi-query search with round-robin merge
+# ============================================================================
+ 
+def embed_and_search_multi(
+    queries: List[str],
+    total_top_k: int = 60,
+    per_query_overhead: int = 5,
+) -> List[str]:
+    """
+    Run vector search for multiple queries and merge results via round-robin.
+ 
+    Each query gets its own per-query budget so every semantic dimension
+    has guaranteed representation in the final candidate list. Items
+    appearing in multiple sub-queries surface earlier (round-robin gives
+    them more chances to land in the merged head).
+ 
+    total_top_k         - total candidates returned after merging
+    per_query_overhead  - extra items pulled per sub-query to allow for
+                          deduplication losses during merge
+ 
+    Falls back to a single-query search if `queries` has exactly one
+    element, since round-robin is meaningless on one input.
+    """
+    if not queries:
+        return []
+ 
+    if len(queries) == 1:
+        return embed_and_search(queries[0], top_k=total_top_k)
+ 
+    per_query_k = max(5, (total_top_k // len(queries)) + per_query_overhead)
+ 
+    per_query_results: List[List[str]] = []
+    for q in queries:
+        urls = embed_and_search(q, top_k=per_query_k)
+        per_query_results.append(urls)
+        logger.debug("Sub-query '%s' returned %d URLs", q[:60], len(urls))
+ 
+    merged = _round_robin_merge(per_query_results, max_total=total_top_k)
+    logger.info(
+        "Multi-query retrieval merged %d sub-queries into %d unique URLs",
+        len(queries), len(merged),
+    )
+    return merged
+ 
+ 
+def _round_robin_merge(
+    per_query_results: List[List[str]],
+    max_total: int,
+) -> List[str]:
+    """
+    Interleave results from multiple sub-queries in round-robin order,
+    skipping duplicates.
+ 
+    Example:
+      input:  [[A, B, C], [X, A, Y], [P, Q, B]]
+      output: A, X, P, B, Y, Q, C        (A and B dedupe across lists)
+    """
+    seen = set()
+    merged: List[str] = []
+    max_depth = max((len(r) for r in per_query_results), default=0)
+ 
+    for depth in range(max_depth):
+        for result_list in per_query_results:
+            if depth >= len(result_list):
+                continue
+            url = result_list[depth]
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            merged.append(url)
+            if len(merged) >= max_total:
+                return merged
+ 
+    return merged
+ 
+ 
 # ============================================================================
 # Diagnostics
 # ============================================================================
-
+ 
 def collection_info() -> dict:
     """Return basic diagnostic info about the collection state."""
     try:

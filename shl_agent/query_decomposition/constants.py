@@ -1,0 +1,2 @@
+DECOMPOSE_MODEL =  "gemini-2.5-flash"
+MAX_SUB_QUERIES = 4

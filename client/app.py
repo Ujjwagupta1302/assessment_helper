@@ -24,11 +24,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import streamlit as st
+from constants import *
 
 
 # ============================================================================
 # Page setup
 # ============================================================================
+
+URL = LOCAL_HOST
 
 st.set_page_config(
     page_title="SHL Agent — Test Client",
@@ -50,7 +53,7 @@ def _init_state() -> None:
     if "conversation_ended" not in st.session_state:
         st.session_state.conversation_ended = False
     if "server_url" not in st.session_state:
-        st.session_state.server_url = "http://localhost:8000"
+        st.session_state.server_url = URL
 
 
 _init_state()
